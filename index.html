@@ -151,6 +151,34 @@
       border: 1px solid rgba(255, 247, 232, 0.3);
       padding: 14px 18px;
     }
+    /* Result (captured photo) — same portrait card so WYSIWYG */
+    #result-card img {
+      position: absolute;
+      inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+    }
+    #save-btn {
+      color: #2a1500;
+      background: linear-gradient(180deg, #ffd97a, var(--gold) 55%, var(--gold-deep));
+      box-shadow: 0 8px 24px rgba(245, 185, 66, 0.35);
+      flex: 1 1 auto;
+      max-width: 280px;
+    }
+    #retake-btn {
+      background: transparent;
+      color: var(--cream);
+      border: 1px solid rgba(255, 247, 232, 0.3);
+      padding: 14px 18px;
+    }
+    .save-hint {
+      margin-top: 10px;
+      font-size: 0.82rem;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.55;
+    }
+    .hidden { display: none !important; }
     footer { margin-top: 18px; font-size: 0.75rem; color: rgba(201, 175, 163, 0.7); text-align: center; }
     canvas#capture-canvas { display: none; }
   </style>
@@ -158,7 +186,7 @@
 <body>
   <header>
     <h1>🙏 <span>Ganesh Utsav</span> Selfie Booth</h1>
-    <p>Align your face in the frame &amp; tap “Take Selfie” — your photo downloads instantly.</p>
+    <p>Align your face in the frame &amp; tap “Take Selfie” — then save your photo.</p>
   </header>
 
   <main class="stage">
@@ -173,12 +201,20 @@
       <div class="flash" id="flash"></div>
     </div>
 
+    <!-- Captured-photo result: the reliable save path on iPhone (long-press / Share sheet) -->
+    <div class="frame-card hidden" id="result-card">
+      <img id="result-img" alt="Your Ganesh Utsav selfie" />
+    </div>
+
     <div class="status" id="status" role="status" aria-live="polite">Requesting camera access…</div>
 
     <div class="controls">
       <button id="snap-btn" type="button" disabled>📸 Take Selfie</button>
       <button id="retry-btn" type="button" hidden>↻ Retry camera</button>
+      <button id="save-btn" type="button" class="hidden">💾 Save Photo</button>
+      <button id="retake-btn" type="button" class="hidden">↻ Retake</button>
     </div>
+    <p class="save-hint hidden" id="save-hint"></p>
   </main>
 
   <canvas id="capture-canvas" aria-hidden="true"></canvas>
@@ -196,9 +232,37 @@
     const loaderEl = document.getElementById('loader');
     const flashEl = document.getElementById('flash');
     const canvas = document.getElementById('capture-canvas');
+    const frameCard = document.getElementById('frame-card');
+    const resultCard = document.getElementById('result-card');
+    const resultImg = document.getElementById('result-img');
+    const saveBtn = document.getElementById('save-btn');
+    const retakeBtn = document.getElementById('retake-btn');
+    const saveHint = document.getElementById('save-hint');
 
     let stream = null;
     let frameReady = false;
+    let lastBlob = null;
+    let lastUrl = null;
+    let lastFilename = 'Ganesh_Utsav_Selfie.png';
+
+    // iPhone/iPad Safari ignores programmatic downloads (no `download`-attr
+    // support), so on iOS we save via the Share sheet / long-press instead.
+    const isIOS = () =>
+      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+    const canvasToBlob = () =>
+      new Promise((resolve, reject) =>
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Export failed'))), 'image/png')
+      );
+
+    function canShareFile(file) {
+      try {
+        return !!(navigator.canShare && navigator.canShare({ files: [file] }));
+      } catch (_) {
+        return false;
+      }
+    }
 
     /* ---------- Overlay: pre-loaded on page load; legacy fallback ---------- */
     overlayImg.addEventListener('load', () => { frameReady = true; });
@@ -299,7 +363,7 @@
       ctx.restore();
     }
 
-    /* ---------- Capture + auto-download ---------- */
+    /* ---------- Capture ---------- */
     async function takeSelfie() {
       if (!stream) {
         setStatus('Camera is not running. Press “Retry camera” first.', true);
@@ -312,10 +376,6 @@
         if (frameReady && overlayImg.naturalWidth > 0) {
           outW = overlayImg.naturalWidth;
           outH = overlayImg.naturalHeight;
-        } else if (video.videoWidth > 0) {
-          // Portrait output sized from the live stream.
-          outW = 1080;
-          outH = 1620; // 2:3 to match the frame artwork ratio
         }
         canvas.width = outW;
         canvas.height = outH;
@@ -338,23 +398,29 @@
           if (frameReady) ctx.drawImage(overlayImg, 0, 0, outW, outH);
         }
 
-        // d+e. Export + instant download.
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const filename = 'Ganesh_Utsav_Selfie_' + stamp + '.png';
-        const dataUrl = canvas.toDataURL('image/png');
-
         flashEl.classList.remove('go');
         void flashEl.offsetWidth; // restart animation
         flashEl.classList.add('go');
 
-        const a = document.createElement('a');
-        a.href = dataUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        // d. Export once; reuse the blob for preview + every save path.
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        lastFilename = 'Ganesh_Utsav_Selfie_' + stamp + '.png';
+        lastBlob = await canvasToBlob();
+        if (lastUrl) URL.revokeObjectURL(lastUrl);
+        lastUrl = URL.createObjectURL(lastBlob);
+        resultImg.src = lastUrl;
 
-        setStatus('🎉 Saved ' + filename + ' — check your downloads.');
+        showResult();
+
+        // e. Desktop/Android: keep the instant auto-download.
+        // iOS: skip it (Mobile Safari silently drops programmatic downloads —
+        // the Save button + visible photo below are the working path there).
+        if (!isIOS()) {
+          triggerAnchorDownload();
+          setStatus('🎉 Saved ' + lastFilename + ' — check your downloads. You can also re-save below.');
+        } else {
+          setStatus('🎉 Photo ready! Tap “Save Photo”, then choose “Save Image”.');
+        }
       } catch (err) {
         setStatus('⚠️ Capture failed: ' + (err.message || err), true);
       } finally {
@@ -362,7 +428,77 @@
       }
     }
 
+    function triggerAnchorDownload() {
+      const a = document.createElement('a');
+      a.href = lastUrl;
+      a.download = lastFilename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    function showResult() {
+      frameCard.classList.add('hidden');
+      resultCard.classList.remove('hidden');
+      snapBtn.classList.add('hidden');
+      retryBtn.hidden = true;
+      saveBtn.classList.remove('hidden');
+      retakeBtn.classList.remove('hidden');
+      saveHint.classList.add('hidden');
+      saveHint.textContent = '';
+    }
+
+    function retake() {
+      if (lastUrl) { URL.revokeObjectURL(lastUrl); lastUrl = null; }
+      lastBlob = null;
+      resultImg.removeAttribute('src');
+      resultCard.classList.add('hidden');
+      frameCard.classList.remove('hidden');
+      saveBtn.classList.add('hidden');
+      retakeBtn.classList.add('hidden');
+      saveHint.classList.add('hidden');
+      snapBtn.classList.remove('hidden');
+      if (stream) setStatus('✅ Live preview ready — pose & tap “Take Selfie”.');
+      else startCamera();
+    }
+
+    /* ---------- Save (iPhone-safe) ---------- */
+    async function savePhoto() {
+      if (!lastBlob) {
+        setStatus('Nothing to save yet — take a selfie first.', true);
+        return;
+      }
+      const file = new File([lastBlob], lastFilename, { type: 'image/png' });
+
+      // 1. Share sheet (iPhone/iPad/Android) → "Save Image" lands in Photos.
+      if (canShareFile(file)) {
+        try {
+          await navigator.share({ files: [file], title: 'Ganesh Utsav Selfie' });
+          setStatus('🎉 Shared — choose “Save Image” to keep it in Photos.');
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') return; // user dismissed sheet
+          // fall through to next method
+        }
+      }
+
+      // 2. Classic download (desktop + Android Chrome).
+      if (!isIOS()) {
+        triggerAnchorDownload();
+        setStatus('🎉 Saved ' + lastFilename + ' — check your downloads.');
+        return;
+      }
+
+      // 3. iPhone without Share API: long-press the visible photo.
+      saveHint.textContent =
+        '👆 Touch and hold the photo above, then tap “Save to Photos” (or “Add to Photos”).';
+      saveHint.classList.remove('hidden');
+      setStatus('Use touch-and-hold on the photo to save it.');
+    }
+
     snapBtn.addEventListener('click', takeSelfie);
+    saveBtn.addEventListener('click', savePhoto);
+    retakeBtn.addEventListener('click', retake);
     retryBtn.addEventListener('click', startCamera);
 
     // Auto-request front camera on page load.
